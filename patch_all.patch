@@ -1,0 +1,975 @@
+diff -rupN get/etc/system.conf new/etc/system.conf
+--- get/etc/system.conf	2018-09-02 18:21:53.262016613 +0200
++++ new/etc/system.conf	2018-08-31 18:55:23.711400451 +0200
+@@ -550,6 +550,19 @@ service hello
+     uid 0;
+ };
+ 
++service clipboard
++{
++        system
++                IRQCTL          # 19
++                DEVIO           # 21
++        ;
++        ipc
++                SYSTEM pm rs tty ds vm vfs
++                pci inet lwip amddev
++        ;
++        uid 0;
++};
++
+ 
+ service devman
+ {
+diff -rupN get/usr/include/minix/callnr.h new/usr/include/minix/callnr.h
+--- get/usr/include/minix/callnr.h	2018-09-02 18:21:53.258016604 +0200
++++ new/usr/include/minix/callnr.h	2018-09-03 16:26:34.241229616 +0200
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_CHECKANCESTOR    (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN get/usr/include/minix/dmap.h new/usr/include/minix/dmap.h
+--- get/usr/include/minix/dmap.h	2018-09-02 18:21:53.262016613 +0200
++++ new/usr/include/minix/dmap.h	2018-09-03 16:26:34.253229652 +0200
+@@ -67,9 +67,10 @@
+ #define BMP085B3S77_MAJOR	  55	/* 55 = /dev/bmp085b3s77 (bmp085)     */
+ 					/* 56-63 = /dev/vnd[0-7] (vnd)	      */
+ #define INPUT_MAJOR		  64	/* 64 = /dev/input (input)            */
+-#define USB_BASE_MAJOR		  65	/* 65-133 = USB major range	      */
++#define CLIPBOARD_MAJOR      65    /* 65 = /dev/clipboard (clipboard)    */
++#define USB_BASE_MAJOR		  66	/* 66-134 = USB major range	      */
+ 
+-#define NR_DEVICES   		 134	/* number of (major) devices */
++#define NR_DEVICES   		 135	/* number of (major) devices */
+ 
+ /* Minor device numbers for memory driver. */
+ #  define RAM_DEV_OLD  		   0	/* minor device for /dev/ram */
+@@ -91,4 +92,3 @@
+ #  define DEV_IMGRD   ((dev_t) 0x0106)	/* device number of /dev/imgrd */
+ 
+ #endif /* _DMAP_H */
+-
+diff -rupN get/usr/include/unistd.h new/usr/include/unistd.h
+--- get/usr/include/unistd.h	2018-09-02 18:21:53.258016604 +0200
++++ new/usr/include/unistd.h	2018-09-03 16:26:34.245229629 +0200
+@@ -88,6 +88,7 @@ __dead	 void _exit(int);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+ int	 chdir(const char *);
++uint8_t check_if_ancestor(pid_t, pid_t);
+ #if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+ int	chown(const char *, uid_t, gid_t) __RENAME(__posix_chown);
+ #else
+@@ -95,6 +96,7 @@ int	chown(const char *, uid_t, gid_t);
+ #endif /* defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE) */
+ int	 close(int);
+ size_t	 confstr(int, char *, size_t);
++uint32_t copy_to_clipboard(char *buffer, uint32_t buffer_len);
+ #ifndef __CUSERID_DECLARED
+ #define __CUSERID_DECLARED
+ /* also declared in stdio.h */
+@@ -127,6 +129,7 @@ int	 isatty(int);
+ int	 link(const char *, const char *);
+ long	 pathconf(const char *, int);
+ int	 pause(void);
++uint32_t paste_from_clipboard(uint32_t id, char *buffer, uint32_t buffer_len);
+ int	 pipe(int *);
+ #if __SSP_FORTIFY_LEVEL == 0
+ ssize_t	 read(int, void *, size_t);
+diff -rupN get/usr/src/include/unistd.h new/usr/src/include/unistd.h
+--- get/usr/src/include/unistd.h	2018-09-02 18:21:53.230016538 +0200
++++ new/usr/src/include/unistd.h	2018-09-02 18:29:21.059058642 +0200
+@@ -88,6 +88,7 @@ __dead	 void _exit(int);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+ int	 chdir(const char *);
++uint8_t check_if_ancestor(pid_t, pid_t);
+ #if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+ int	chown(const char *, uid_t, gid_t) __RENAME(__posix_chown);
+ #else
+@@ -95,6 +96,7 @@ int	chown(const char *, uid_t, gid_t);
+ #endif /* defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE) */
+ int	 close(int);
+ size_t	 confstr(int, char *, size_t);
++uint32_t copy_to_clipboard(char *buffer, uint32_t buffer_len);
+ #ifndef __CUSERID_DECLARED
+ #define __CUSERID_DECLARED
+ /* also declared in stdio.h */
+@@ -127,6 +129,7 @@ int	 isatty(int);
+ int	 link(const char *, const char *);
+ long	 pathconf(const char *, int);
+ int	 pause(void);
++uint32_t paste_from_clipboard(uint32_t id, char *buffer, uint32_t buffer_len);
+ int	 pipe(int *);
+ #if __SSP_FORTIFY_LEVEL == 0
+ ssize_t	 read(int, void *, size_t);
+diff -rupN get/usr/src/lib/libc/misc/check_if_ancestor.c new/usr/src/lib/libc/misc/check_if_ancestor.c
+--- get/usr/src/lib/libc/misc/check_if_ancestor.c	2018-09-02 18:21:53.234016548 +0200
++++ new/usr/src/lib/libc/misc/check_if_ancestor.c	2018-08-31 15:15:58.364456000 +0200
+@@ -0,0 +1,11 @@
++#include <lib.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++uint8_t check_if_ancestor(pid_t pid1, pid_t pid2) {
++    message m;
++    m.m1_i1 = pid1;
++    m.m1_i2 = pid2;
++
++    return _syscall(PM_PROC_NR, PM_CHECKANCESTOR, &m);
++}
+diff -rupN get/usr/src/lib/libc/misc/clipboard_protocol.h new/usr/src/lib/libc/misc/clipboard_protocol.h
+--- get/usr/src/lib/libc/misc/clipboard_protocol.h	1970-01-01 01:00:00.000000000 +0100
++++ new/usr/src/lib/libc/misc/clipboard_protocol.h	2018-09-03 16:26:34.257229665 +0200
+@@ -0,0 +1,58 @@
++#ifndef _CLIPBOARD_PROTOCOL_H_
++#define _CLIPBOARD_PROTOCOL_H_
++
++#include <stdint.h>
++
++#ifdef DEBUG
++#define log_msg(...) {printf("[%s] ", __FUNCTION__); printf(__VA_ARGS__);}
++#else
++#define log_msg(...) {}
++#endif
++
++#define LOCK_SIZE	(sizeof(struct clipboard_lock_msg))
++#define GET_SIZE	(sizeof(struct clipboard_get_msg))
++#define SET_SIZE	(sizeof(struct clipboard_set_msg))
++#define ENTRY_LEN_LIMIT 1024
++#define BUF_MAX_COUNT 100
++
++#define IS_PID_QUERY(size) (size < GET_SIZE ? 1 : 0)
++#define IS_CORRECT_ID(id) (size < BUF_MAX_COUNT ? 1 : 0)
++#define ENCODE_ID(id) (id)
++#define DECODE_ID(size) (size)
++
++#define ENCODE_PID(pid) (GET_SIZE + (pid))
++#define DECODE_PID(size)  ((size) - GET_SIZE)
++
++
++struct clipboard_lock_msg {
++    uint32_t pid;
++    uint32_t id;
++    uint32_t buffer_len;
++};
++typedef struct clipboard_lock_msg* clipboard_lock_msg_ptr;
++
++struct clipboard_get_msg {
++    uint32_t buffer_len;
++    uint32_t decompressed_len;
++    char buffer[ENTRY_LEN_LIMIT];
++};
++typedef struct clipboard_get_msg* clipboard_get_msg_ptr;
++
++struct clipboard_set_msg {
++    uint32_t pid;
++    uint32_t buffer_len;
++    uint32_t decompressed_len;
++    char buffer[ENTRY_LEN_LIMIT];
++};
++typedef struct clipboard_set_msg* clipboard_set_msg_ptr;
++
++struct clipboard_write_msg {
++    union {
++        struct clipboard_lock_msg lock;
++        struct clipboard_set_msg set;
++    } u;
++};
++typedef struct clipboard_write_msg* clipboard_write_msg_ptr;
++
++
++#endif // __CLIPBOARD_PROTOCOL_H_
+diff -rupN get/usr/src/lib/libc/misc/copy_paste_clipboard.c new/usr/src/lib/libc/misc/copy_paste_clipboard.c
+--- get/usr/src/lib/libc/misc/copy_paste_clipboard.c	2018-09-02 18:21:53.238016557 +0200
++++ new/usr/src/lib/libc/misc/copy_paste_clipboard.c	2018-09-03 15:47:52.409145290 +0200
+@@ -0,0 +1,106 @@
++#include <ctype.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include "clipboard_protocol.h"
++
++extern uint8_t check_if_ancestor(pid_t pid1, pid_t pid2);
++
++void include_char(uint32_t* len, uint32_t* counter, uint32_t pos) {
++    if (*counter == 0 && pos > 0) {
++        (*len)++;
++    } else {
++        *len += *counter;
++        *counter = 0;
++    }
++}
++
++uint32_t expected_decompressed_size(const char* buffer, uint32_t buffer_len) {
++    uint32_t len = 0;
++    uint32_t current = 0;
++    uint32_t pos = 0;
++
++    for (; pos < buffer_len; pos++) {
++        char c = buffer[pos];
++        if (!isdigit(c)) {
++            include_char(&len, &current, pos);
++        } else {
++            current = 10 * current + c - '0';
++        }
++    }
++
++    include_char(&len, &current, pos);
++    return len;
++}
++
++uint32_t paste_from_clipboard(uint32_t id, char* buffer, uint32_t buffer_len) {
++    int ret;
++    int fd;
++    int locking_pid;
++    int source_pid;
++    struct clipboard_lock_msg ml;
++    struct clipboard_get_msg mg;
++
++    if ((fd = open("/dev/clipboard", O_RDWR)) < 0) {
++        log_msg("open failed %d\n", fd);
++        return -1;
++    }
++
++    if (id >= BUF_MAX_COUNT) {
++        log_msg("Wrong id=%d, expected < %d\n", id, BUF_MAX_COUNT);
++        return -1;
++    }
++
++    if ((source_pid = read(fd, &mg, ENCODE_ID(id))) < 0) {
++        log_msg("Wrong id?\n");
++        return -1;
++    }
++    locking_pid = getpid();
++
++    if (!check_if_ancestor(source_pid, locking_pid)) {
++        log_msg("You don't have permission to lock this entry\n");
++        return -1;
++    }
++
++    ml.pid = locking_pid;
++    ml.id = id;
++    ml.buffer_len = buffer_len;
++    if ((ret = write(fd, &ml, LOCK_SIZE)) < 0) return ret;
++
++    memset(&mg, 0, GET_SIZE);
++    if ((ret = read(fd, &mg, ENCODE_PID(ml.pid))) < 0) return ret;
++
++    memcpy(buffer, mg.buffer, mg.buffer_len);
++    close(fd);
++
++    return ret;
++}
++
++uint32_t copy_to_clipboard(char* buffer, uint32_t buffer_len) {
++    int fd;
++    int ret;
++    struct clipboard_set_msg ms;
++
++    if (buffer_len > ENTRY_LEN_LIMIT) {
++        return -1;
++    }
++
++    if ((fd = open("/dev/clipboard", O_WRONLY)) < 0) {
++        log_msg("open failed %d\n", fd);
++        return -1;
++    }
++
++    ms.pid = getpid();
++    ms.buffer_len = buffer_len;
++    ms.decompressed_len = expected_decompressed_size(buffer, buffer_len);
++
++    memcpy(ms.buffer, buffer, buffer_len);
++    ret = write(fd, &ms, SET_SIZE);
++
++    close(fd);
++
++    return ret;
++}
+diff -rupN get/usr/src/lib/libc/misc/Makefile.inc new/usr/src/lib/libc/misc/Makefile.inc
+--- get/usr/src/lib/libc/misc/Makefile.inc	2018-09-02 18:21:53.238016557 +0200
++++ new/usr/src/lib/libc/misc/Makefile.inc	2018-09-02 18:35:44.980025031 +0200
+@@ -8,3 +8,6 @@ SRCS+=	initfini.c
+ 
+ # for -fstack-protector
+ SRCS+=	stack_protector.c
++
++SRCS+=  check_if_ancestor.c
++SRCS+=  copy_paste_clipboard.c
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/bw386389.c new/usr/src/minix/drivers/examples/clipboard/bw386389.c
+--- get/usr/src/minix/drivers/examples/clipboard/bw386389.c	2018-09-02 18:21:53.250016585 +0200
++++ new/usr/src/minix/drivers/examples/clipboard/bw386389.c	2018-09-03 16:26:23.165196490 +0200
+@@ -0,0 +1,343 @@
++﻿#include <minix/drivers.h>
++#include <minix/chardriver.h>
++#include <minix/ds.h>
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "bw386389.h"
++
++static clipboard_t CLIPBOARD;
++
++/*
++ * Function prototypes for the clipboard driver.
++ */
++static int clipboard_open(devminor_t minor, int access, endpoint_t user_endpt);
++static int clipboard_close(devminor_t minor);
++static ssize_t clipboard_read(devminor_t minor, u64_t position, endpoint_t endpt,
++                              cp_grant_id_t grant, size_t size, int flags, cdev_id_t id);
++static ssize_t clipboard_write(devminor_t minor, u64_t position, endpoint_t endpt,
++                               cp_grant_id_t grant, size_t size, int flags, cdev_id_t id);
++
++
++/* SEF functions and variables. */
++static void sef_local_startup(void);
++static int sef_cb_init(int type, sef_init_info_t *info);
++static int sef_cb_lu_state_save(int);
++static int lu_state_restore(void);
++
++/* Entry points to the clipboard driver. */
++static struct chardriver clipboard_tab =
++{
++    .cdr_open	= clipboard_open,
++    .cdr_close	= clipboard_close,
++    .cdr_read   = clipboard_read,
++    .cdr_write  = clipboard_write
++};
++
++
++void delete_entry(uint32_t id) {
++    assert(locked(id));
++    push(id, &CLIPBOARD.available_entries);
++    free(entry_buffer(id));
++    slot(id) = EMPTY;
++}
++
++
++static int clipboard_open(devminor_t UNUSED(minor), int UNUSED(access),
++                          endpoint_t UNUSED(user_endpt))
++{
++    log_msg("\n");
++    return OK;
++}
++
++static int clipboard_close(devminor_t UNUSED(minor))
++{
++    log_msg("\n");
++    return OK;
++}
++
++int get_lock_id(pid_t pid) {
++    for(uint32_t id = 0; id < BUF_MAX_COUNT; id++) {
++        if(entry(id).locking_pid == pid && locked(id)) {
++            log_msg("Found lock on entry with id=%d pid=%d\n", id, pid);
++            return id;
++        }
++    }
++    log_msg("Pid=%d locks nothing.\n", pid);
++    return -1;
++}
++
++void do_clipboard_real_set(int id, clipboard_set_msg_ptr msg) {
++    log_msg("Used entry with id=%d\n", id);
++    entry_buffer(id) = (char*) malloc(sizeof(char) * msg->buffer_len);
++    memcpy(entry_buffer(id), msg->buffer, msg->buffer_len);
++    entry(id).buffer_len = msg->buffer_len;
++    entry(id).decompressed_len = msg->decompressed_len;
++    entry(id).source_pid = msg->pid;
++    slot(id) = USED;
++}
++
++
++int do_clipboard_set(clipboard_set_msg_ptr msg) {
++    int id;
++
++    if(is_empty(&CLIPBOARD.available_entries)) {
++        log_msg("There are no available entries\n");
++        return -1;
++    }
++    id = top(&CLIPBOARD.available_entries);
++    pop(&CLIPBOARD.available_entries);
++    if(busy(id) || locked(id)) {
++        log_msg("ID is already in use... should panic\n");
++        return -1;
++    }
++
++    do_clipboard_real_set(id, msg);
++
++    return id;
++}
++
++int do_clipboard_lock(clipboard_lock_msg_ptr msg) {
++    int id = get_lock_id(msg->pid);
++    if(id >= 0) {
++        log_msg("Unlocked previous locked entry with id=%d\n", id);
++        unlock(id);
++    }
++
++    id = msg->id;
++
++    if(slot(id) == LOCKED || !busy(id)) {
++        log_msg("Current slot is not locked or is not in use.\n");
++        return -1;
++    }
++
++    if(msg->buffer_len < entry(id).decompressed_len) {
++        log_msg("Your buffer is too small to save the decompressed entry (%d < %d) \n", msg->buffer_len, entry(id).decompressed_len);
++        return -1;
++    }
++
++
++    lock_by(id, msg->pid);
++    log_msg("Sucessfully locked entry with id=%d pid=%d\n", id, msg->pid);
++    return OK;
++}
++
++int do_clipboard_get(clipboard_get_msg_ptr msg, pid_t pid) {
++    int id;
++    if((id = get_lock_id(pid)) < 0) {
++        return -1;
++    }
++
++    memcpy(msg->buffer, entry_buffer(id), entry_len(id));
++    msg->decompressed_len = entry(id).decompressed_len;
++    msg->buffer_len = entry_len(id);
++    delete_entry(id);
++
++    log_msg("Successfully copied entry with id=%d\n", id);
++    return OK;
++}
++
++
++static ssize_t clipboard_read(devminor_t UNUSED(minor), u64_t UNUSED(position),
++                              endpoint_t endpt, cp_grant_id_t grant, size_t size, int UNUSED(flags),
++                              cdev_id_t UNUSED(id))
++{
++    int ret;
++    int id;
++    int pid;
++    int rsize;
++    if(IS_PID_QUERY(size)) {
++        id = DECODE_ID(size);
++        if(!IS_CORRECT_ID(id)) {
++            log_msg("Wrong id [PID QUERY]\n");
++            return -1;
++        }
++        else {
++            pid = entry(id).source_pid;
++            log_msg("Got pid %d [PID QUERY] from entry with id=%d\n", pid, id);
++            return pid;
++        }
++    }
++
++    rsize = GET_SIZE;
++    pid = DECODE_PID(size);
++    log_msg("decoded pid as %d\n", pid);
++    struct clipboard_get_msg msg;
++
++    log_msg("\n");
++    if(pid < 0) {
++        log_msg("Wrong pid %d\n", pid);
++        return -1;
++    }
++
++    if ((ret = do_clipboard_get(&msg, pid) != OK))
++        return ret;
++
++    if (((ret = sys_safecopyto(endpt, grant, 0, (vir_bytes) &msg, rsize))) != OK)
++        return ret;
++
++    return OK;
++}
++
++static ssize_t clipboard_write(devminor_t UNUSED(minor), u64_t UNUSED(position),
++                               endpoint_t endpt, cp_grant_id_t grant, size_t size, int UNUSED(flags),
++                               cdev_id_t UNUSED(id))
++{
++    assert(LOCK_SIZE != GET_SIZE);
++    int ret;
++    struct clipboard_write_msg msg;
++    log_msg("\n");
++
++    if(size == LOCK_SIZE || size == SET_SIZE) {
++        if ((ret = sys_safecopyfrom(endpt, grant, 0, (vir_bytes) &msg, size)) != OK)
++            return ret;
++    }
++    else {
++        log_msg("Wrong size %d != %d\n", sizeof(msg), size);
++        return -1;
++    }
++
++    if(size == LOCK_SIZE) {
++        return do_clipboard_lock(&msg.u.lock);
++    }
++    else if(size == SET_SIZE) {
++        return do_clipboard_set(&msg.u.set);
++    }
++
++    return -1;
++}
++
++void log_string(const char* c, uint32_t len) {
++    for(int i = 0; i < len; i++)
++        printf("%c", c[i]);
++
++    printf(" |LEN=%d| ", len);
++}
++
++void clipboard_log() {
++#ifdef DEBUG
++    static int k = 0;
++
++    log_msg("LOG %d \n", k++);
++    for(int i = 0; i < BUF_MAX_COUNT; i++) {
++        if(busy(i)) {
++            printf("%d (LE=%d, DE=%d):  ", i, entry_len(i), entry(i).decompressed_len);
++            log_string(entry_buffer(i), entry_len(i));
++            printf("\n");
++        }
++    }
++#endif
++}
++
++void clipboard_init() {
++    init(&CLIPBOARD.available_entries);
++    for(int i = 0; i < BUF_MAX_COUNT; i++) {
++        slot(i) = EMPTY;
++    }
++}
++
++static int sef_cb_lu_state_save(int UNUSED(state)) {
++    /* Save the state. */
++    char name[16] = "buf_";
++    uint32_t i;
++
++    log_msg("Current state:\n");
++    clipboard_log();
++    ds_publish_mem("clipboard",(char*) &CLIPBOARD, sizeof(clipboard_t), DSF_OVERWRITE);
++    for(i = 0; i < BUF_MAX_COUNT; i++) {
++        if(slot(i) != EMPTY) {
++            snprintf(name + 4, 12, "%d", i);
++            log_msg("Saves %s\n", name);
++            ds_publish_mem(name, (char*) entry_buffer(i), entry_len(i), DSF_OVERWRITE);
++            free(entry_buffer(i));
++        }
++    }
++    return OK;
++}
++
++static int lu_state_restore() {
++    /* Restore the state. */
++    char name[16] = "buf_";
++    uint32_t size;
++    uint32_t i;
++
++    size = sizeof(clipboard_t);
++    ds_retrieve_mem("clipboard",(char*) &CLIPBOARD, &size);
++    ds_delete_mem("clipboard");
++
++    log_msg("restored state:\n");
++    for(i = 0; i < BUF_MAX_COUNT; i++) {
++        if(slot(i) != EMPTY) {
++            snprintf(name + 4, 12, "%d", i);
++            entry_buffer(i) = (char*) malloc(sizeof(char) * entry_len(i));
++            log_msg("Restores %s\n", name);
++            size = sizeof(char) * entry_len(i);
++            ds_retrieve_mem(name, (char*) entry_buffer(i), &size);
++            ds_delete_mem(name);
++        }
++    }
++    clipboard_log();
++    return OK;
++}
++
++static void sef_local_startup()
++{
++    /*
++     * Register init callbacks. Use the same function for all event types
++     */
++    sef_setcb_init_fresh(sef_cb_init);
++    sef_setcb_init_lu(sef_cb_init);
++    sef_setcb_init_restart(sef_cb_init);
++
++    /*
++     * Register live update callbacks.
++     */
++    /* - Agree to update immediately when LU is requested in a valid state. */
++    sef_setcb_lu_prepare(sef_cb_lu_prepare_always_ready);
++    /* - Support live update starting from any standard state. */
++    sef_setcb_lu_state_isvalid(sef_cb_lu_state_isvalid_standard);
++    /* - Register a custom routine to save the state. */
++    sef_setcb_lu_state_save(sef_cb_lu_state_save);
++
++    /* Let SEF perform startup. */
++    sef_startup();
++}
++
++static int sef_cb_init(int type, sef_init_info_t *UNUSED(info))
++{
++    switch(type) {
++    case SEF_INIT_FRESH:
++        log_msg("SEF_INIT_FRESH\n");
++        clipboard_init();
++        break;
++
++    case SEF_INIT_LU:
++        /* Restore the state. */
++        lu_state_restore();
++        log_msg("SEF_INIT_LU Hey, I'm a new version!\n");
++        break;
++
++    case SEF_INIT_RESTART:
++        log_msg("SEF_INIT_RESTART Hey, I've just been restarted!\n");
++        break;
++    }
++
++    /* Initialization completed successfully. */
++    return OK;
++}
++
++
++int main(void)
++{
++    /*
++     * Perform initialization.
++     */
++    sef_local_startup();
++
++    /*
++     * Run the main loop.
++     */
++    chardriver_task(&clipboard_tab);
++    return OK;
++}
++
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/bw386389.h new/usr/src/minix/drivers/examples/clipboard/bw386389.h
+--- get/usr/src/minix/drivers/examples/clipboard/bw386389.h	1970-01-01 01:00:00.000000000 +0100
++++ new/usr/src/minix/drivers/examples/clipboard/bw386389.h	2018-09-03 15:49:23.045480504 +0200
+@@ -0,0 +1,40 @@
++#ifndef _BW386389_H_
++#define _BW386389_H_
++
++#include <stdint.h>
++#include <sys/ioctl.h>
++#include "stack.h"
++#include "clipboard_protocol.h"
++
++#define OK 0
++
++typedef struct Entry {
++    uint32_t buffer_len;
++    uint32_t decompressed_len;
++    pid_t source_pid;
++    pid_t locking_pid;
++    char* buffer;
++    char in_use;
++} entry_t;
++
++
++typedef struct Clipboard {
++    entry_t entries[BUF_MAX_COUNT];
++    struct Stack available_entries;
++} clipboard_t;
++
++
++#define entry(id) CLIPBOARD.entries[(id)]
++#define entry_len(id) entry(id).buffer_len
++#define entry_buffer(id) entry(id).buffer
++#define EMPTY 0
++#define USED 1
++#define LOCKED 2
++#define slot(id) (entry((id)).in_use)
++#define busy(id) (slot(id) == USED)
++#define lock(id) {slot(id) = LOCKED;}
++#define unlock(id) {slot(id) = USED;}
++#define locked(id) (slot(id) == LOCKED)
++#define lock_by(id, pid) {lock(id); entry((id)).locking_pid = (pid);}
++
++#endif // _BW386389_H_
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/clipboard_protocol.h new/usr/src/minix/drivers/examples/clipboard/clipboard_protocol.h
+--- get/usr/src/minix/drivers/examples/clipboard/clipboard_protocol.h	1970-01-01 01:00:00.000000000 +0100
++++ new/usr/src/minix/drivers/examples/clipboard/clipboard_protocol.h	2018-09-03 16:15:14.367224152 +0200
+@@ -0,0 +1,58 @@
++#ifndef _CLIPBOARD_PROTOCOL_H_
++#define _CLIPBOARD_PROTOCOL_H_
++
++#include <stdint.h>
++
++#ifdef DEBUG
++#define log_msg(...) {printf("[%s] ", __FUNCTION__); printf(__VA_ARGS__);}
++#else
++#define log_msg(...) {}
++#endif
++
++#define LOCK_SIZE	(sizeof(struct clipboard_lock_msg))
++#define GET_SIZE	(sizeof(struct clipboard_get_msg))
++#define SET_SIZE	(sizeof(struct clipboard_set_msg))
++#define ENTRY_LEN_LIMIT 1024
++#define BUF_MAX_COUNT 100
++
++#define IS_PID_QUERY(size) (size < GET_SIZE ? 1 : 0)
++#define IS_CORRECT_ID(id) (size < BUF_MAX_COUNT ? 1 : 0)
++#define ENCODE_ID(id) (id)
++#define DECODE_ID(size) (size)
++
++#define ENCODE_PID(pid) (GET_SIZE + (pid))
++#define DECODE_PID(size)  ((size) - GET_SIZE)
++
++
++struct clipboard_lock_msg {
++    uint32_t pid;
++    uint32_t id;
++    uint32_t buffer_len;
++};
++typedef struct clipboard_lock_msg* clipboard_lock_msg_ptr;
++
++struct clipboard_get_msg {
++    uint32_t buffer_len;
++    uint32_t decompressed_len;
++    char buffer[ENTRY_LEN_LIMIT];
++};
++typedef struct clipboard_get_msg* clipboard_get_msg_ptr;
++
++struct clipboard_set_msg {
++    uint32_t pid;
++    uint32_t buffer_len;
++    uint32_t decompressed_len;
++    char buffer[ENTRY_LEN_LIMIT];
++};
++typedef struct clipboard_set_msg* clipboard_set_msg_ptr;
++
++struct clipboard_write_msg {
++    union {
++        struct clipboard_lock_msg lock;
++        struct clipboard_set_msg set;
++    } u;
++};
++typedef struct clipboard_write_msg* clipboard_write_msg_ptr;
++
++
++#endif // __CLIPBOARD_PROTOCOL_H_
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/Makefile new/usr/src/minix/drivers/examples/clipboard/Makefile
+--- get/usr/src/minix/drivers/examples/clipboard/Makefile	2018-09-02 18:21:53.250016585 +0200
++++ new/usr/src/minix/drivers/examples/clipboard/Makefile	2018-09-02 15:24:48.524523408 +0200
+@@ -0,0 +1,8 @@
++# Makefile for the clipboard driver.
++PROG=	clipboard
++SRCS=	bw386389.c stack.c stack.h bw386389.h clipboard_protocol.h
++
++DPADD+=	${LIBCHARDRIVER} ${LIBSYS}
++LDADD+=	-lchardriver -lsys
++
++.include <minix.service.mk>
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/stack.c new/usr/src/minix/drivers/examples/clipboard/stack.c
+--- get/usr/src/minix/drivers/examples/clipboard/stack.c	1970-01-01 01:00:00.000000000 +0100
++++ new/usr/src/minix/drivers/examples/clipboard/stack.c	2018-09-01 21:15:11.085751227 +0200
+@@ -0,0 +1,43 @@
++#include <stdlib.h>
++#include <assert.h>
++#include "stack.h"
++
++uint32_t* lower_bound(bstack_t s) {
++    return &s->value[0];
++}
++
++uint32_t* upper_bound(bstack_t s) {
++    return &s->value[STACK_SIZE];
++}
++
++void push(int value, bstack_t stack) {
++    if(stack->current != upper_bound(stack)) {
++        *(stack->current) = value;
++        stack->current++;
++    }
++}
++
++int is_empty(const bstack_t stack) {
++    return stack->current == lower_bound(stack);
++}
++
++uint32_t top(bstack_t stack) {
++    assert(!is_empty(stack));
++    uint32_t* ptr = stack->current;
++    return *(--ptr);
++}
++
++void pop(bstack_t stack) {
++    --stack->current;
++}
++
++void init(bstack_t stack) {
++    for(uint32_t i = 0; i < STACK_SIZE; i++) {
++        stack->value[i] = i;
++    }
++    stack->current = upper_bound(stack);
++}
++
++void clear(bstack_t stack) {
++    stack->current = lower_bound(stack);
++}
+diff -rupN get/usr/src/minix/drivers/examples/clipboard/stack.h new/usr/src/minix/drivers/examples/clipboard/stack.h
+--- get/usr/src/minix/drivers/examples/clipboard/stack.h	1970-01-01 01:00:00.000000000 +0100
++++ new/usr/src/minix/drivers/examples/clipboard/stack.h	2018-09-01 14:54:09.574456182 +0200
+@@ -0,0 +1,29 @@
++#ifndef SO_7_STACK_H
++#define SO_7_STACK_H
++
++#include <stdint.h>
++
++#define STACK_SIZE 100
++
++typedef struct Stack {
++    uint32_t value[STACK_SIZE];
++    uint32_t* current;
++}* bstack_t;
++
++uint32_t* lower_bound(bstack_t s);
++
++uint32_t* upper_bound(bstack_t s);
++
++void push(int value, bstack_t stack);
++
++int is_empty(const bstack_t stack);
++
++uint32_t top(bstack_t stack);
++
++void pop(bstack_t stack);
++
++void clear(bstack_t stack);
++
++void init(bstack_t stack);
++
++#endif //SO_7_STACK_H
+diff -rupN get/usr/src/minix/drivers/examples/Makefile new/usr/src/minix/drivers/examples/Makefile
+--- get/usr/src/minix/drivers/examples/Makefile	2018-09-02 18:21:53.250016585 +0200
++++ new/usr/src/minix/drivers/examples/Makefile	2018-08-31 18:57:45.067574536 +0200
+@@ -1,5 +1,6 @@
+ .include <bsd.own.mk>
+ 
+ SUBDIR+=	hello
++SUBDIR+=    clipboard
+ 
+ .include <bsd.subdir.mk>
+diff -rupN get/usr/src/minix/include/minix/callnr.h new/usr/src/minix/include/minix/callnr.h
+--- get/usr/src/minix/include/minix/callnr.h	2018-09-02 18:21:53.242016566 +0200
++++ new/usr/src/minix/include/minix/callnr.h	2018-08-31 14:34:46.796733000 +0200
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_CHECKANCESTOR    (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN get/usr/src/minix/include/minix/dmap.h new/usr/src/minix/include/minix/dmap.h
+--- get/usr/src/minix/include/minix/dmap.h	2018-09-02 18:21:53.242016566 +0200
++++ new/usr/src/minix/include/minix/dmap.h	2018-09-01 16:19:10.954201997 +0200
+@@ -67,9 +67,10 @@
+ #define BMP085B3S77_MAJOR	  55	/* 55 = /dev/bmp085b3s77 (bmp085)     */
+ 					/* 56-63 = /dev/vnd[0-7] (vnd)	      */
+ #define INPUT_MAJOR		  64	/* 64 = /dev/input (input)            */
+-#define USB_BASE_MAJOR		  65	/* 65-133 = USB major range	      */
++#define CLIPBOARD_MAJOR      65    /* 65 = /dev/clipboard (clipboard)    */
++#define USB_BASE_MAJOR		  66	/* 66-134 = USB major range	      */
+ 
+-#define NR_DEVICES   		 134	/* number of (major) devices */
++#define NR_DEVICES   		 135	/* number of (major) devices */
+ 
+ /* Minor device numbers for memory driver. */
+ #  define RAM_DEV_OLD  		   0	/* minor device for /dev/ram */
+@@ -91,4 +92,3 @@
+ #  define DEV_IMGRD   ((dev_t) 0x0106)	/* device number of /dev/imgrd */
+ 
+ #endif /* _DMAP_H */
+-
+diff -rupN get/usr/src/minix/servers/pm/do_check_if_ancestor.c new/usr/src/minix/servers/pm/do_check_if_ancestor.c
+--- get/usr/src/minix/servers/pm/do_check_if_ancestor.c	2018-09-02 18:21:53.246016576 +0200
++++ new/usr/src/minix/servers/pm/do_check_if_ancestor.c	2018-09-03 14:11:00.358116314 +0200
+@@ -0,0 +1,36 @@
++#include "pm.h"
++#include "mproc.h"
++
++#define pid(i) (mproc[(i)].mp_pid)
++#define parent(i) (mproc[(i)].mp_parent)
++#define active(i) (mproc[(i)].mp_flags & IN_USE)
++
++int do_checkifancestor(void) {
++    pid_t pid1 = m_in.m1_i1;
++    pid_t pid2 = m_in.m1_i2;
++
++    if(pid1 == pid2) {return 1;}
++
++    int current_idx = 0;
++    int found = 0;
++    int last_idx = 0;
++
++    for(int i = 0; i < NR_PROCS; i++) {
++        if(active(i) && pid(i) == pid2) {
++            current_idx = i;
++            found = 1;
++            break;
++        }
++    }
++
++    if(found == 0) { return 0;}
++
++    do {
++        last_idx = current_idx;
++        current_idx = parent(last_idx);
++
++        if(pid(current_idx) == pid1) { return 1; }
++    } while(pid(current_idx) != 1);
++
++    return 0;
++}
+diff -rupN get/usr/src/minix/servers/pm/Makefile new/usr/src/minix/servers/pm/Makefile
+--- get/usr/src/minix/servers/pm/Makefile	2018-09-02 18:21:53.246016576 +0200
++++ new/usr/src/minix/servers/pm/Makefile	2018-08-31 15:32:57.761986000 +0200
+@@ -6,6 +6,8 @@ SRCS=	main.c forkexit.c exec.c time.c al
+ 	signal.c utility.c table.c trace.c getset.c misc.c \
+ 	profile.c mcontext.c schedule.c
+ 
++SRCS+= do_check_if_ancestor.c
++
+ DPADD+=	${LIBSYS} ${LIBTIMERS}
+ LDADD+=	-lsys -ltimers
+ 
+diff -rupN get/usr/src/minix/servers/pm/proto.h new/usr/src/minix/servers/pm/proto.h
+--- get/usr/src/minix/servers/pm/proto.h	2018-09-02 18:21:53.246016576 +0200
++++ new/usr/src/minix/servers/pm/proto.h	2018-08-31 14:21:44.102788000 +0200
+@@ -9,6 +9,9 @@ int do_itimer(void);
+ void set_alarm(struct mproc *rmp, clock_t ticks);
+ void check_vtimer(int proc_nr, int sig);
+ 
++/* check_if_ancestor.c */
++int do_checkifancestor(void);
++
+ /* exec.c */
+ int do_exec(void);
+ int do_newexec(void);
+diff -rupN get/usr/src/minix/servers/pm/table.c new/usr/src/minix/servers/pm/table.c
+--- get/usr/src/minix/servers/pm/table.c	2018-09-02 18:21:53.250016585 +0200
++++ new/usr/src/minix/servers/pm/table.c	2018-08-31 14:24:28.831204000 +0200
+@@ -58,5 +58,6 @@ int (* const call_vec[NR_PM_CALLS])(void
+ 	CALL(PM_EXEC_RESTART)	= do_execrestart,
+ 	CALL(PM_GETEPINFO)	= do_getepinfo,		/* getepinfo(2) */
+ 	CALL(PM_GETPROCNR)	= do_getprocnr,		/* getprocnr(2) */
+-	CALL(PM_GETSYSINFO)	= do_getsysinfo		/* getsysinfo(2) */
++	CALL(PM_GETSYSINFO)	= do_getsysinfo,	/* getsysinfo(2) */
++	CALL(PM_CHECKANCESTOR)	= do_checkifancestor	/* check_if_ancestor(2) */
+ };

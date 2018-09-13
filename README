@@ -1,0 +1,87 @@
+*******************************************************************************
+Uwagi
+*******************************************************************************
+
+Proszę o użycie komendy service up /service/clipboard -dev /dev/clipboard.
+
+Łatka zawiera wszystkie potrzebne zmiany poza plikiem asemblerowym.
+Łatka modyfikuje plik usr/src/minix/drivers/examples/Makefile dodając podfolder clipboard.
+W łatce są również pliki stack.h stack.c bw386389.h bw386389.c, które są wymagane do poprawnego działania urządzenia.
+
+Zakładam również, że proces jest swoim potomkiem, aby procesy mogły odczytywać własne wpisy.
+
+*******************************************************************************
+Protokół.
+*******************************************************************************
+Funkcje biblioteczne komunikują się z urządzeniem za pomocą operacji
+zapisu i odczytu poprzez przekazywanie sobie wiadomości na 2 sposoby.
+1. Poprzez wiadomość zakodowaną w parametrze size (funkcja read)
+2. Poprzez wiadomość zakodowaną w buforze o określonym rozmiarze (funkcja write)
+
+Wszystkie typy wiadomości i sposób kodowania parametrów są zapisane w pliku
+clipboard_protocol.h w folderach /usr/src/lib/libc/misc oraz /usr/src/minix/drivers/examples/clipboard.
+
+Założenia:
+- Nie obsługujemy wpisów dłuższych niż ENTRY_LEN_LIMIT (1024).
+- Zakładamy, że LOCK_SIZE oraz SET_SIZE są różne. (Funkcja write musi rozróżniać te dwa typy wiadomości.)
+
+
+paste_from_clipboard:
+0. Otwórz plik /dev/clipboard (deskryptor fd)
+
+1. Odbierz pid wpisu o danym id.
+	read(fd, ..., ENCODE_ID(id));
+	Funkcja read w tym przypadku nie zapisuje niczego sensownego do buforu, ale zwraca:
+		-1, gdy napotkano błąd,
+		pid właściciela (pid procesu, który zapisał wpis do schowka), w przeciwnym przypadku
+
+2. check_if_ancestor(pid właściciela, własny pid);
+
+3. Załóż blokadę na wpis o podanym id.
+	Jeśli proces o podanym pidzie posiadał inną blokadę to zostaje ona zdjęta.
+	Jako wiadomość przekazuje się clipboard_lock_msg (własny pid, id wpisu, długość posiadanego buforu)
+	write(fd, wiadomość, LOCK_SIZE);
+	Funkcja write zwraca w tym przypadku:
+		-1, w przypadku błędu (np. wtedy gdy bufor jest za mały)
+		0, gdy blokada się powiodła
+
+4. Odczytaj wiadomość typu clipboard_get_msg i usuń wpis ze schowka
+	read(fd, &wiadomość, ENCODE_PID(własny pid))
+	Funkcja read zwraca:
+		-1, w przypadku błędu
+		0 w przeciwnym przypadku
+
+5. Zamknij plik /dev/clipboard
+
+
+copy_to_clipboard:
+0. Otwórz plik /dev/clipboard (deskryptor fd)
+
+1. Zapisz wiadomość typu clipboard_set_msg (własny pid, długość buforu, długość buforu zdekompresowanego, wpis)
+	write(fd, &wiadomość, SET_SIZE)
+
+2. Zamknij plik /dev/clipboard
+
+*******************************************************************************
+Algorytm zarządzający wpisami.
+*******************************************************************************
+0. Struktura
+Struktura urządzenia (plik /usr/src/minix/drivers/examples/clipboard/bw386389.h) składa się z:
+- stosu zawierającego wolne indeksy w tablicy wpisów (statyczny bufor ze wskaźnikiem na pierwsze wolne miejsce)
+- tablicy wpisów.
+
+Struktura stosu jest zdefiniowana w pliku  /usr/src/minix/drivers/examples/clipboard/stack.h
+
+Każdy wpis to:
+typedef struct Entry
+    uint32_t buffer_len; // długość skompresowanego tekstu
+    uint32_t decompressed_len; //długość zdekompresowanego tekstu
+    pid_t source_pid; // pid procesu który stworzył wpis
+    pid_t locking_pid; // pid procesu który chce odczytać wpis
+    char* buffer; // wskaźnik na dynamicznie zaalokowany bufor
+    char in_use; // stan wpisu (pusty / zajęty / zablokowany)
+} entry_t;
+
+1. Inne założenia.
+Proces może zapisać lub zablokować wpis oraz odczytać zablokowany wpis.
+Wpis może zostać zablokowany tylko wtedy, gdy proces jest procesem potomnym właściciela wpisu (lub właścicielem).
